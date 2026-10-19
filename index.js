@@ -456,7 +456,7 @@ var pickRow = (job) => {
 function createDb({ url = process.env.SUPABASE_URL, key = process.env.SUPABASE_SERVICE_ROLE_KEY, fetchImpl = fetch } = {}) {
   if (!url || !key) throw new Error("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY");
   const base = url.replace(/\/$/, "") + "/rest/v1";
-  const headers = { apikey: key, authorization: `Bearer ${key}`, "content-type": "application/json" };
+  const headers = { apikey: key, ...key.startsWith("sb_") ? {} : { authorization: `Bearer ${key}` }, "content-type": "application/json" };
   async function rest(path, { method = "GET", body, prefer = "return=representation" } = {}) {
     const r = await fetchImpl(`${base}/${path}`, { method, headers: { ...headers, prefer }, body: body === void 0 ? void 0 : JSON.stringify(body) });
     if (!r.ok) throw new Error(`Database ${method} ${path.split("?")[0]} failed (HTTP ${r.status})`);
@@ -2130,6 +2130,21 @@ function makeHandlers(deps = {}) {
       } catch (e) {
         return fail(res, e);
       }
+    },
+    // Safe self-check: shows which settings exist (never their values) and whether the database answers.
+    "/api/health": async (req, res) => {
+      if (req.method !== "GET") return send(res, 405, { error: "GET only" });
+      const e = process.env, ok = (v, n = 1) => v && String(v).length >= n ? "set" : "MISSING";
+      const settings = { SUPABASE_URL: ok(e.SUPABASE_URL), SUPABASE_SERVICE_ROLE_KEY: ok(e.SUPABASE_SERVICE_ROLE_KEY), ADMIN_TOKEN: ok(e.ADMIN_TOKEN, 20), CRON_SECRET: ok(e.CRON_SECRET, 16), SITE_URL: ok(e.SITE_URL), SCAN_CONTACT: ok(e.SCAN_CONTACT), "TOKEN_SECRET (needed for email)": ok(e.TOKEN_SECRET, 32) };
+      let database;
+      try {
+        const rows = await db().rest("vc_firms?select=id&limit=100");
+        database = rows.length ? `OK: connected, ${rows.length} VC firms found` : "PROBLEM: connected, but the VC list is empty. Run supabase-setup.sql in the Supabase SQL Editor";
+      } catch (err) {
+        const code = /HTTP (\d+)/.exec(err.message)?.[1];
+        database = "PROBLEM: " + (code === "401" || code === "403" ? "Supabase rejected the key (HTTP " + code + "). Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY" : code === "404" ? "tables not found (HTTP 404). Run supabase-setup.sql in the Supabase SQL Editor" : err.message);
+      }
+      send(res, 200, { settings, database, email: emailEnabled() ? "on" : "off (optional)" });
     },
     "/api/ping": async (req, res) => {
       res.statusCode = 200;
