@@ -1877,7 +1877,7 @@ var COMMON = `var $=function(i){return document.getElementById(i)};
 function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
 async function api(p,o){o=o||{};var h={'x-requested-with':'cvmatch'};if(o.type)h['content-type']=o.type;
  var r=await fetch(p,{method:o.method||'GET',credentials:'same-origin',headers:h,body:o.body});var j={};try{j=await r.json()}catch(e){}return {ok:r.ok,status:r.status,data:j}}`;
-function renderApp() {
+function renderApp({ contactEnabled = false } = {}) {
   return shell("Israeli VC Jobs: see which roles your CV is strongest for", `
 <header><h1>Israeli VC Jobs</h1><small>Which VC-backed roles is your CV strongest for?</small></header>
 <main>
@@ -1909,7 +1909,7 @@ function renderApp() {
 <label style="font-weight:400"><input type="checkbox" id="cons"> I agree to receive this email. My address and skills summary are stored until I unsubscribe (one click in every email).</label>
 <p><button id="send" type="button">Send me a confirmation link</button></p><div id="emsg" class="msg" role="status"></div></div>
 <div class="card"><h2>Your data</h2><p class="hint">Delete your skills summary from our servers right now.</p><button class="sec" id="del" type="button">Delete my data</button></div>
-</section></main>`, COMMON + `
+</section>${contactEnabled ? '<p class="hint" style="text-align:center;margin-top:18px"><a href="/contact" style="color:inherit">Contact us</a></p>' : ""}</main>`, COMMON + `
 var P=null,ME=null,timer=null;
 function setMsg(id,t,cls){var m=$(id);m.className='msg'+(cls?' '+cls:'');m.textContent=t||''}
 async function upload(body,type,name){setMsg('upmsg','Reading your CV...');$('drop').style.opacity=.6;
@@ -2050,6 +2050,49 @@ $('ana').onclick=async function(){$('report').replaceChildren();var r=await fetc
  if(u.clicks_by_company.length)section('Apply clicks by company',table(['Company','Clicks'],u.clicks_by_company.map(function(x){return [x.name,x.count]})));
  section('Email',table(['Pending confirmation','Active weekly'],[[d.email.pending_confirmation,d.email.weekly_active]]),'Addresses are never shown here.')};`);
 }
+function renderContact({ enabled }) {
+  const form = enabled ? `<p class="hint">Questions, feedback, or a VC or company we should add? Write to us.</p>
+<div id="f"><label for="name">Name (optional)</label><input id="name" maxlength="80" autocomplete="name">
+<label for="email">Your email (so we can reply)</label><input id="email" type="email" maxlength="254" autocomplete="email">
+<label for="msg">Message</label><textarea id="msg" maxlength="2000" style="min-height:150px"></textarea><div class="hint" id="cnt">0 / 2000</div>
+<div style="position:absolute;left:-9999px" aria-hidden="true"><label for="website">Leave this empty</label><input id="website" tabindex="-1" autocomplete="off"></div>
+<label style="font-weight:400"><input type="checkbox" id="ok"> I agree that my message and email address are sent to the site team through a form service (Formspree) so they can reply. They are not stored on this site.</label>
+<p><button id="send" type="button">Send message</button></p></div><div id="m" class="msg" role="status"></div>` : '<p class="hint">The contact form is not set up yet. Please check back soon.</p>';
+  return shell(
+    "Contact us",
+    `<header><h1>Israeli VC Jobs</h1><small>Contact us</small></header><main><div class="card"><h2>Contact us</h2>${form}</div><p class="hint"><a href="/" style="color:inherit">Back to the jobs</a></p></main>`,
+    COMMON + `var msg=$('msg');if(msg){msg.addEventListener('input',function(){$('cnt').textContent=msg.value.length+' / 2000'});
+$('send').onclick=async function(){var m=$('m');m.className='msg';if(!$('ok').checked){m.className='msg err';m.textContent='Please tick the box to agree.';return}
+ this.disabled=true;m.textContent='Sending...';var r=await api('/api/contact',{method:'POST',type:'application/json',body:JSON.stringify({name:$('name').value,email:$('email').value,message:msg.value,website:$('website').value})});
+ if(r.ok){$('f').hidden=true;m.className='msg ok';m.textContent='Thank you. We got your message and will reply to '+$('email').value+'.'}else{this.disabled=false;m.className='msg err';m.textContent=r.data.error||'Could not send. Please try again.'}}}`
+  );
+}
+
+// src/contact.mjs
+var contactUrl = (env = process.env) => /^https:\/\/[^\s]+$/i.test(env.CONTACT_FORM_URL ?? "") ? env.CONTACT_FORM_URL : null;
+var clean = (s, max) => String(s ?? "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "").replace(/\r\n?/g, "\n").trim().slice(0, max);
+async function sendContact(db, { name, email, message, website }, { ip }, { fetchImpl = fetch, env = process.env } = {}) {
+  const url = contactUrl(env);
+  if (!url) return { ok: false, status: 503, error: "The contact form is not set up yet." };
+  if (clean(website, 200)) return { ok: true };
+  const n = clean(name, 80).replace(/\s+/g, " "), e = clean(email, 254).toLowerCase(), m = clean(message, 2e3);
+  if (!EMAIL_RE.test(e)) return { ok: false, status: 400, error: "Please enter a valid email address so we can reply." };
+  if (m.length < 10) return { ok: false, status: 400, error: "Please write a little more (at least 10 characters)." };
+  const a = await rateLimit(db, `contact-ip:${sha256(ip)}`, 5, 3600);
+  if (!a.ok) return { ok: false, status: 429, error: "Too many messages from your network. Please try again later." };
+  const b = await rateLimit(db, `contact-email:${sha256(e)}`, 3, 86400);
+  if (!b.ok) return { ok: false, status: 429, error: "Too many messages from this address today. Please try again tomorrow." };
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), 1e4);
+  try {
+    const r = await fetchImpl(url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json" }, body: JSON.stringify({ name: n, email: e, message: m, _subject: "Israeli VC Jobs: new message" }), signal: ac.signal });
+    return r.ok ? { ok: true } : { ok: false, status: 502, error: "We could not send your message right now. Please try again later." };
+  } catch {
+    return { ok: false, status: 502, error: "We could not send your message right now. Please try again later." };
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 // src/handlers.mjs
 var safeUrl2 = (u) => /^https?:\/\//i.test(u ?? "") ? u : null;
@@ -2108,7 +2151,26 @@ function makeHandlers(deps = {}) {
     "/": async (req, res) => {
       if (req.method !== "GET") return send(res, 405, { error: "GET only" });
       await track(db(), ["visit"]);
-      page(res, renderApp({ emailEnabled: emailEnabled() }));
+      page(res, renderApp({ emailEnabled: emailEnabled(), contactEnabled: !!contactUrl() }));
+    },
+    "/contact": async (req, res) => {
+      if (req.method !== "GET") return send(res, 405, { error: "GET only" });
+      page(res, renderContact({ enabled: !!contactUrl() }));
+    },
+    "/api/contact": async (req, res) => {
+      if (!guard(req, res, "POST")) return;
+      try {
+        const d = db();
+        const b = await readJson(req, 1e4);
+        const r = await sendContact(d, b, { ip: clientIp(req) }, deps.contactDeps);
+        if (r.ok) {
+          if (!String(b.website ?? "").trim()) await track(d, ["contact_sent"]);
+          return send(res, 200, { ok: true });
+        }
+        send(res, r.status, { error: r.error });
+      } catch (e) {
+        fail(res, e);
+      }
     },
     "/admin": async (req, res) => {
       if (req.method !== "GET") return send(res, 405, { error: "GET only" });
@@ -2135,7 +2197,7 @@ function makeHandlers(deps = {}) {
     "/api/health": async (req, res) => {
       if (req.method !== "GET") return send(res, 405, { error: "GET only" });
       const e = process.env, ok = (v, n = 1) => v && String(v).length >= n ? "set" : "MISSING";
-      const settings = { SUPABASE_URL: ok(e.SUPABASE_URL), SUPABASE_SERVICE_ROLE_KEY: ok(e.SUPABASE_SERVICE_ROLE_KEY), ADMIN_TOKEN: ok(e.ADMIN_TOKEN, 20), CRON_SECRET: ok(e.CRON_SECRET, 16), SITE_URL: ok(e.SITE_URL), SCAN_CONTACT: ok(e.SCAN_CONTACT), "TOKEN_SECRET (needed for email)": ok(e.TOKEN_SECRET, 32) };
+      const settings = { SUPABASE_URL: ok(e.SUPABASE_URL), SUPABASE_SERVICE_ROLE_KEY: ok(e.SUPABASE_SERVICE_ROLE_KEY), ADMIN_TOKEN: ok(e.ADMIN_TOKEN, 20), CRON_SECRET: ok(e.CRON_SECRET, 16), SITE_URL: ok(e.SITE_URL), SCAN_CONTACT: ok(e.SCAN_CONTACT), "TOKEN_SECRET (needed for email)": ok(e.TOKEN_SECRET, 32), "CONTACT_FORM_URL (optional)": contactUrl() ? "set" : "not set" };
       let database;
       try {
         const rows = await db().rest("vc_firms?select=id&limit=100");
@@ -2479,7 +2541,11 @@ function makeHandlers(deps = {}) {
 function makeRouter(deps = {}) {
   const routes = makeHandlers(deps);
   return async function router(req, res) {
-    const path = new URL(req.url, "http://x").pathname.replace(/\/+$/, "") || "/";
+    const u = new URL(req.url, "http://x");
+    let path = u.pathname;
+    const hint = u.searchParams.get("__p");
+    if ((path === "/api" || path === "/api/index") && hint && hint.startsWith("/") && hint.length <= 120) path = hint;
+    path = path.replace(/\/+$/, "") || "/";
     const handler = Object.hasOwn(routes, path) ? routes[path] : null;
     if (!handler) {
       res.statusCode = 404;
