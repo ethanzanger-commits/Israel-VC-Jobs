@@ -1,7 +1,18 @@
 {
-  "rewrites": [{ "source": "/(.*)", "destination": "/api" }],
+  "rewrites": [
+    {
+      "source": "/(.*)",
+      "destination": "/api?__p=/$1"
+    }
+  ],
   "crons": [
-    { "path": "/api/cron/scan?limit=20", "schedule": "0 5 * * *" },
-    { "path": "/api/cron/digest", "schedule": "0 7 * * *" }
+    {
+      "path": "/api/cron/scan?limit=20",
+      "schedule": "0 5 * * *"
+    },
+    {
+      "path": "/api/cron/digest",
+      "schedule": "0 7 * * *"
+    }
   ]
 }
