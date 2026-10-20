@@ -1914,7 +1914,7 @@ var P=null,ME=null,timer=null;
 function setMsg(id,t,cls){var m=$(id);m.className='msg'+(cls?' '+cls:'');m.textContent=t||''}
 async function upload(body,type,name){setMsg('upmsg','Reading your CV...');$('drop').style.opacity=.6;
  var r=await api('/api/cv',{method:'POST',body:body,type:type});$('drop').style.opacity=1;
- if(!r.ok){setMsg('upmsg',r.data.error||'Upload failed','err');return}
+ if(!r.ok){setMsg('upmsg',(r.data.error||'Upload failed')+(r.data.code?' (code: '+r.data.code+')':''),'err');return}
  setMsg('upmsg','Done. Found '+r.data.profile.skills.length+' skills.','ok');P=r.data.profile;show()}
 $('file').onchange=function(){var f=this.files[0];if(!f)return;if(f.size>4*1024*1024){setMsg('upmsg','That file is over 4 MB. Try a smaller PDF or paste the text.','err');return}upload(f,'application/octet-stream');this.value=''};
 ['dragover','dragenter'].forEach(function(e){$('drop').addEventListener(e,function(ev){ev.preventDefault();$('drop').classList.add('over')})});
@@ -1999,7 +1999,7 @@ function renderAdmin() {
 <div class="card"><h2>Import portfolio companies</h2><p class="hint">JSON list. Add "evidence_url" to an investor only if you saw the company on that VC's page; otherwise it is stored as unverified.</p>
 <textarea id="items" spellcheck="false">[
   {"name":"Example Co","website":"https://example.com","ats":{"adapter":"greenhouse","identifier":"REPLACE"},"investors":[{"vc":"Aleph","evidence_url":"https://..."}]}
-]</textarea><p><button id="imp" type="button">Import</button> <button class="sec" id="scan" type="button">Scan 10 companies now</button> <button class="sec" id="stat" type="button">Status</button> <button class="sec" id="ana" type="button">Analytics</button></p></div>
+]</textarea><p><button id="imp" type="button">Import</button> <button class="sec" id="scan" type="button">Scan 10 companies now</button> <button class="sec" id="stat" type="button">Status</button> <button class="sec" id="ana" type="button">Analytics</button> <button class="sec" id="selft" type="button">Run self-test</button></p></div>
 <div id="report"></div>
 <div class="card"><pre id="out" style="white-space:pre-wrap;margin:0"></pre></div></main>`, COMMON + `
 async function call(p,m,b){var r=await fetch(p,{method:m,headers:{'authorization':'Bearer '+$('tk').value,'content-type':'application/json'},body:b});var t=await r.text();$('out').textContent=r.status+' '+t}
@@ -2037,7 +2037,9 @@ $('find').onclick=async function(){var F=$('found');F.replaceChildren();F.append
  var rows=[];d.boards.forEach(function(b){var w=el('div','why');var c=document.createElement('input');c.type='checkbox';c.checked=true;c.style.width='auto';var n=document.createElement('input');n.value=b.name;n.maxLength=80;n.style.margin='0 8px';var t=el('span','hint',b.adapter+': '+b.identifier);w.append(c,n,t);F.append(w);rows.push({c:c,n:n,b:b})});
  var btn=el('button',null,'Add selected');btn.type='button';btn.onclick=async function(){var sel=rows.filter(function(x){return x.c.checked}).map(function(x){return {name:x.n.value,adapter:x.b.adapter,identifier:x.b.identifier}});addMsg('Adding...');var a=await adm('/api/admin/quick-add',{vc:$('vc').value,evidence_url:$('ev').value,boards:sel});addMsg(a.ok?summary(a.data):(a.data.error||'Failed'),a.ok?'ok':'err')};F.append(el('p'));F.lastChild.append(btn)};
 $('imp').onclick=function(){var v;try{v=JSON.parse($('items').value)}catch(e){$('out').textContent='That is not valid JSON';return}call('/api/admin/import','POST',JSON.stringify({items:v}))};
-$('scan').onclick=function(){call('/api/admin/scan','POST','{}')};$('stat').onclick=function(){call('/api/admin/status','GET')};
+$('scan').onclick=function(){call('/api/admin/scan','POST','{}')};
+$('selft').onclick=async function(){$('report').replaceChildren();$('out').textContent='Running...';var r=await fetch('/api/admin/selftest',{headers:{'authorization':'Bearer '+$('tk').value}});if(!r.ok){$('out').textContent=r.status+' '+(await r.text());return}var d=await r.json();$('out').textContent='';
+ section(d.ok?'Self-test: all good':'Self-test: something needs fixing',table(['Check','Result','Details'],d.steps.map(function(x){return [x.name,x.ok?'OK':'PROBLEM',x.note]})),d.ok?'Uploads, the database and both file readers work.':'Fix the first PROBLEM row, then run it again.')};$('stat').onclick=function(){call('/api/admin/status','GET')};
 function table(h,rows){var t=el('table');t.style.cssText='width:100%;border-collapse:collapse;font-size:13px';var tr=el('tr');h.forEach(function(x){var c=el('th',null,x);c.style.cssText='text-align:left;border-bottom:1px solid var(--line);padding:4px';tr.append(c)});t.append(tr);
  rows.forEach(function(r){var q=el('tr');r.forEach(function(x){var c=el('td',null,x==null?'-':String(x));c.style.cssText='padding:4px;border-bottom:1px solid var(--line)';q.append(c)});t.append(q)});return t}
 function section(title,node,note){var c=el('div','card');c.append(el('h2',null,title));if(note)c.append(el('p','hint',note));c.append(node);$('report').append(c)}
@@ -2094,6 +2096,76 @@ async function sendContact(db, { name, email, message, website }, { ip }, { fetc
   }
 }
 
+// src/selftest.mjs
+init_extract();
+import { randomBytes as randomBytes2 } from "node:crypto";
+
+// src/selftest-fixtures.mjs
+var PDF_B64 = "JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgKG9wZW5zb3VyY2UpCjEgMCBvYmoKPDwKL0YxIDIgMCBSCj4+CmVuZG9iagoyIDAgb2JqCjw8Ci9CYXNlRm9udCAvSGVsdmV0aWNhIC9FbmNvZGluZyAvV2luQW5zaUVuY29kaW5nIC9OYW1lIC9GMSAvU3VidHlwZSAvVHlwZTEgL1R5cGUgL0ZvbnQKPj4KZW5kb2JqCjMgMCBvYmoKPDwKL0NvbnRlbnRzIDcgMCBSIC9NZWRpYUJveCBbIDAgMCA1OTUuMjc1NiA4NDEuODg5OCBdIC9QYXJlbnQgNiAwIFIgL1Jlc291cmNlcyA8PAovRm9udCAxIDAgUiAvUHJvY1NldCBbIC9QREYgL1RleHQgL0ltYWdlQiAvSW1hZ2VDIC9JbWFnZUkgXQo+PiAvUm90YXRlIDAgL1RyYW5zIDw8Cgo+PiAKICAvVHlwZSAvUGFnZQo+PgplbmRvYmoKNCAwIG9iago8PAovUGFnZU1vZGUgL1VzZU5vbmUgL1BhZ2VzIDYgMCBSIC9UeXBlIC9DYXRhbG9nCj4+CmVuZG9iago1IDAgb2JqCjw8Ci9BdXRob3IgKGFub255bW91cykgL0NyZWF0aW9uRGF0ZSAoRDoyMDI2MTAyMDExMDE0MiswMCcwMCcpIC9DcmVhdG9yIChhbm9ueW1vdXMpIC9LZXl3b3JkcyAoKSAvTW9kRGF0ZSAoRDoyMDI2MTAyMDExMDE0MiswMCcwMCcpIC9Qcm9kdWNlciAoUmVwb3J0TGFiIFBERiBMaWJyYXJ5IC0gXChvcGVuc291cmNlXCkpIAogIC9TdWJqZWN0ICh1bnNwZWNpZmllZCkgL1RpdGxlICh1bnRpdGxlZCkgL1RyYXBwZWQgL0ZhbHNlCj4+CmVuZG9iago2IDAgb2JqCjw8Ci9Db3VudCAxIC9LaWRzIFsgMyAwIFIgXSAvVHlwZSAvUGFnZXMKPj4KZW5kb2JqCjcgMCBvYmoKPDwKL0xlbmd0aCAyNzQKPj4Kc3RyZWFtCjEgMCAwIDEgMCAwIGNtICBCVCAvRjEgMTIgVGYgMTQuNCBUTCBFVApCVCAxIDAgMCAxIDUwIDc4MCBUbSAoU2VsZiB0ZXN0IENWOiBzZW5pb3IgcGVyZm9ybWFuY2UgbWFya2V0aW5nIG1hbmFnZXIgd2l0aCBTUUwgYW5kIHBhaWQgbWVkaWEgc2tpbGxzLikgVGogVCogRVQKQlQgMSAwIDAgMSA1MCA3NjAgVG0gKFNlY29uZCBsaW5lIG9mIHRleHQgc28gdGhlIGRvY3VtZW50IHJlYWNoZXMgdGhlIG1pbmltdW0gbGVuZ3RoIGZvciB0aGUgcmVhZGVyIGNoZWNrLikgVGogVCogRVQKIAplbmRzdHJlYW0KZW5kb2JqCnhyZWYKMCA4CjAwMDAwMDAwMDAgNjU1MzUgZiAKMDAwMDAwMDA2MSAwMDAwMCBuIAowMDAwMDAwMDkyIDAwMDAwIG4gCjAwMDAwMDAxOTkgMDAwMDAgbiAKMDAwMDAwMDQwMiAwMDAwMCBuIAowMDAwMDAwNDcwIDAwMDAwIG4gCjAwMDAwMDA3MzEgMDAwMDAgbiAKMDAwMDAwMDc5MCAwMDAwMCBuIAp0cmFpbGVyCjw8Ci9JRCAKWzxhMjU4NWUzNDM3YWJhYjRhZTFhZWE4Nzc0NDEzOWY1ND48YTI1ODVlMzQzN2FiYWI0YWUxYWVhODc3NDQxMzlmNTQ+XQolIFJlcG9ydExhYiBnZW5lcmF0ZWQgUERGIGRvY3VtZW50IC0tIGRpZ2VzdCAob3BlbnNvdXJjZSkKCi9JbmZvIDUgMCBSCi9Sb290IDQgMCBSCi9TaXplIDgKPj4Kc3RhcnR4cmVmCjExMTQKJSVFT0YK";
+var DOCX_B64 = "UEsDBBQAAAAIADVYVF3MVIwQ4AAAAJwBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbH2Qy07DMBBFf8XyFsUTukAIJekCyhJYlA+w7Eli4Zc8bil/z6QtXaDC0r6PM7rd+hC82GMhl2Ivb1UrBUaTrItTL9+3z829XA/d9isjCbZG6uVca34AIDNj0KRSxsjKmErQlZ9lgqzNh54QVm17BybFirE2demQQ/eEo975KjYH/j5hC3qS4vFkXFi91Dl7Z3RlHfbR/qI0Z4Li5NFDs8t0wwYJVwmL8jfgnHvlHYqzKN50qS86sAs+U7Fgk9kFTqr/a67cmcbRGbzkl7ZckkEiHjh4dVGCdvHnfjjOPXwDUEsDBBQAAAAIADVYVF02V97cogAAABgBAAALAAAAX3JlbHMvLnJlbHONzzsOwjAMBuCrRN6pCwNCqGkXhNQVlQNEiZtGNA8l4XV7MjBQxMBo+/dnuekedmY3isl4x2Fd1cDISa+M0xzOw3G1g65tTjSLXBJpMiGxsuIShynnsEdMciIrUuUDuTIZfbQilzJqDEJehCbc1PUW46cBS5P1ikPs1RrY8Az0j+3H0Ug6eHm15PKPE1+JIouoKXO4+6hQvdtVYQHbBhcvti9QSwMEFAAAAAgANVhUXUc6rVjwAAAAfAEAABEAAAB3b3JkL2RvY3VtZW50LnhtbG1QsU7FMAz8FSs7TWFAqGrfG5CYWNAD9pD4tVETJ7LzKPw9SSVggOWcOJc7n8fjRwzwjiw+0aSuu14Bkk3O0zypl+eHqzt1PIzb4JK9RKQClU8ybJNaSsmD1mIXjEa6lJHq2zlxNKVeedZbYpc5WRSpcjHom76/1dF4Uk3yLbnPVnMDblAOJwxnKCgF7l8HECSfGDLyLksWIRpesVS5eiIzI8PmywKnp0cw5CAb7yCi8wZk9SFIN+qm25B3zH8tbdp/spnZ5AUkQVkQfhIzmppR9mb05OMlQkCaq20da29XiqujVJpd/3PU32n17yYPX1BLAQIUAxQAAAAIADVYVF3MVIwQ4AAAAJwBAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAgANVhUXTZX3tyiAAAAGAEAAAsAAAAAAAAAAAAAAIABEQEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgANVhUXUc6rVjwAAAAfAEAABEAAAAAAAAAAAAAAIAB3AEAAHdvcmQvZG9jdW1lbnQueG1sUEsFBgAAAAADAAMAuQAAAPsCAAAAAA==";
+
+// src/selftest.mjs
+function explain(e) {
+  const m = /HTTP (\d+)/.exec(e?.message ?? "");
+  if (m) return m[1] === "401" || m[1] === "403" ? `Supabase rejected the key (HTTP ${m[1]}). Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel` : m[1] === "404" ? "table or function not found (HTTP 404). Run supabase-setup.sql in the Supabase SQL Editor" : `database error (HTTP ${m[1]})`;
+  return `${e?.name ?? "Error"}: ${String(e?.message ?? e).slice(0, 160)}`;
+}
+function codeOf(e) {
+  const m = /Database .* failed \(HTTP (\d+)\)/.exec(e?.message ?? "");
+  if (m) return `db-${m[1]}`;
+  if (e?.code === "ERR_MODULE_NOT_FOUND" || /Cannot find (package|module)/i.test(e?.message ?? "")) return "missing-dependency";
+  if (/SUPABASE_URL|SERVICE_ROLE/.test(e?.message ?? "")) return "missing-setting";
+  return "internal";
+}
+async function selfTest(db, env = process.env) {
+  const steps = [];
+  const add = async (name, fn) => {
+    try {
+      steps.push({ name, ok: true, note: await fn() ?? "" });
+    } catch (e) {
+      steps.push({ name, ok: false, note: explain(e) });
+    }
+  };
+  await add("Database read (VC list)", async () => {
+    const r = await db.rest("vc_firms?select=id&limit=100");
+    if (!r.length) throw new Error("The VC list is empty. Run supabase-setup.sql in the Supabase SQL Editor");
+    return `${r.length} VC firms`;
+  });
+  await add("Database write (rate limits)", async () => {
+    const k = "selftest:" + randomBytes2(6).toString("hex");
+    await rateLimit(db, k, 5, 60);
+    await db.rest(`rate_limits?key=eq.${encodeURIComponent(k)}`, { method: "DELETE", prefer: "return=minimal" });
+  });
+  await add("Sessions table (needed for uploads)", async () => {
+    const h = sha256("selftest" + randomBytes2(8).toString("hex"));
+    await db.rest("cv_sessions", { method: "POST", body: [{ token_hash: h, profile: {}, expires_at: new Date(Date.now() + 6e4).toISOString() }], prefer: "return=minimal" });
+    await db.rest(`cv_sessions?token_hash=eq.${h}`, { method: "DELETE", prefer: "return=minimal" });
+  });
+  await add("PDF reader", async () => {
+    const t = await extractCvText(Buffer.from(PDF_B64, "base64"));
+    if (!/performance marketing/i.test(t)) throw new Error("PDF opened but no text came out");
+    return "reads text";
+  });
+  await add("Word (DOCX) reader", async () => {
+    const t = await extractCvText(Buffer.from(DOCX_B64, "base64"));
+    if (!/performance marketing/i.test(t)) throw new Error("DOCX opened but no text came out");
+    return "reads text";
+  });
+  const a = { name: "Analytics (optional)", ok: true, note: "" };
+  try {
+    await db.rest("rpc/bump_metrics", { method: "POST", body: { p_day: (/* @__PURE__ */ new Date()).toISOString().slice(0, 10), p_names: ["selftest"] }, prefer: "return=minimal" });
+    a.note = "installed";
+    await db.rest(`metrics_daily?name=eq.selftest`, { method: "DELETE", prefer: "return=minimal" }).catch(() => {
+    });
+  } catch {
+    a.note = "not installed (optional; the site works without it)";
+  }
+  steps.push(a);
+  const miss = ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "ADMIN_TOKEN", "CRON_SECRET", "SITE_URL", "SCAN_CONTACT"].filter((k) => !env[k]);
+  steps.push({ name: "Settings", ok: !miss.length, note: miss.length ? "missing: " + miss.join(", ") : "all required settings present" });
+  return { ok: steps.every((s) => s.ok), steps };
+}
+
 // src/handlers.mjs
 var safeUrl2 = (u) => /^https?:\/\//i.test(u ?? "") ? u : null;
 var sameSecret = (a, b) => {
@@ -2114,7 +2186,12 @@ function makeHandlers(deps = {}) {
     }
     return true;
   };
-  const fail = (res, e) => e instanceof CvError || e instanceof HarvestError || e?.status ? send(res, e.status ?? 400, { error: e.message }) : send(res, 500, { error: "Something went wrong. Please try again." });
+  const fail = (res, e) => {
+    if (e instanceof CvError || e instanceof HarvestError || e?.status) return send(res, e.status ?? 400, { error: e.message });
+    const code = codeOf(e);
+    console.error("cvmatch error", code, e?.name ?? "", /^Database /.test(e?.message ?? "") ? e.message : "");
+    return send(res, 500, { error: "Something went wrong. Please try again.", code });
+  };
   const adminOk = async (req, res, d) => {
     const t = process.env.ADMIN_TOKEN;
     if (!t || t.length < 20) {
@@ -2461,6 +2538,16 @@ function makeHandlers(deps = {}) {
         const b = await readJson(req);
         const only = typeof b.company === "string" && /^[a-z0-9-]{1,80}$/.test(b.company) ? b.company : void 0;
         send(res, 200, await runScanJob({ db: d, only, limit: only ? 1 : 10, delayMs: 300, ...deps.scanDeps }));
+      } catch (e) {
+        fail(res, e);
+      }
+    },
+    "/api/admin/selftest": async (req, res) => {
+      if (req.method !== "GET") return send(res, 405, { error: "GET only" });
+      try {
+        const d = db();
+        if (!await adminOk(req, res, d)) return;
+        send(res, 200, await selfTest(d));
       } catch (e) {
         fail(res, e);
       }
