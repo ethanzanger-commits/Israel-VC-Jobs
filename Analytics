@@ -1,0 +1,20 @@
+-- Analytics add-on (privacy-first aggregate counters). Run ONCE in Supabase > SQL Editor if you already ran setup.sql.
+create table if not exists metrics_daily (
+  day date not null, name text not null, count bigint not null default 0,
+  primary key (day, name)
+);
+alter table metrics_daily enable row level security;
+revoke all on metrics_daily from anon, authenticated;
+
+-- Atomic "add 1 to each name for today" (names may repeat in the array).
+create or replace function bump_metrics(p_day date, p_names text[]) returns void
+language sql security definer set search_path = public as $$
+  insert into metrics_daily (day, name, count)
+  select p_day, n, count(*) from unnest(p_names) as n group by n
+  on conflict (day, name) do update set count = metrics_daily.count + excluded.count;
+$$;
+revoke all on function bump_metrics(date, text[]) from public, anon, authenticated;
+grant execute on function bump_metrics(date, text[]) to service_role;
+
+-- Tell Supabase's API to refresh its list of tables right now (avoids a short "table not found" window after creating them).
+notify pgrst, 'reload schema';
