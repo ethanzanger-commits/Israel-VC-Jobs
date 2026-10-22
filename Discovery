@@ -1,0 +1,29 @@
+-- Auto-discovery add-on. Run ONCE in Supabase > SQL Editor if you already ran setup.sql (a fresh setup.sql already includes it).
+create table if not exists discovery_targets (
+  id uuid primary key default gen_random_uuid(),
+  vc_firm_id uuid not null references vc_firms(id) on delete cascade,
+  kind text not null check (kind in ('vc_site','company_site')),
+  url text not null, evidence_url text, cap int,
+  status text not null default 'pending' check (status in ('pending','working','done','no_board','failed','skipped')),
+  note text, attempts int not null default 0,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (vc_firm_id, url)
+);
+create index if not exists discovery_pending on discovery_targets (status, kind, created_at);
+alter table discovery_targets enable row level security;
+revoke all on discovery_targets from anon, authenticated;
+
+-- VC website addresses (from memory, NOT verified: discovery reports any that fail, and you can fix them on the admin page)
+update vc_firms v set website = w.url from (values
+ ('Entrée Capital','https://entreecap.com'),('Aleph','https://aleph.vc'),('Pitango','https://www.pitango.com'),('TLV Partners','https://www.tlv.partners'),
+ ('83North','https://www.83north.com'),('Viola Ventures','https://www.viola-group.com'),('Vertex Ventures Israel','https://www.vertexventures.co.il'),
+ ('F2 Venture Capital','https://www.f2vc.com'),('Team8','https://team8.vc'),('Glilot Capital Partners','https://www.glilotcapital.com'),
+ ('OurCrowd','https://www.ourcrowd.com'),('aMoon','https://www.amoon.vc'),('10D','https://www.10d.vc'),('Magma Venture Partners','https://www.magmavc.com'),
+ ('YL Ventures','https://www.ylventures.com'),('Qumra Capital','https://www.qumracapital.com'),('Hanaco Ventures','https://www.hanaco.vc'),
+ ('Grove Ventures','https://www.grove.vc'),('JVP','https://www.jvpvc.com'),('Andreessen Horowitz','https://a16z.com'),('Sequoia Capital','https://www.sequoiacap.com'),
+ ('Lightspeed Venture Partners','https://lsvp.com'),('Bessemer Venture Partners','https://www.bvp.com'),('NFX','https://www.nfx.com'),
+ ('Insight Partners','https://www.insightpartners.com'),('Battery Ventures','https://www.battery.com'),('Cyberstarts','https://www.cyberstarts.com')
+) as w(name, url) where v.name = w.name and v.website is null;
+
+-- Tell Supabase's API to refresh its list of tables right now (avoids a short "table not found" window after creating them).
+notify pgrst, 'reload schema';
