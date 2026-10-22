@@ -1,0 +1,157 @@
+-- CV Job Match: run this whole file ONCE in Supabase > SQL Editor.
+create extension if not exists pgcrypto;
+
+-- ===== Job catalog (public information, written by the scanner) =====
+create table if not exists vc_firms (
+  id uuid primary key default gen_random_uuid(),
+  name text not null unique,
+  firm_type text not null check (firm_type in ('israeli','international')),
+  website text, created_at timestamptz not null default now()
+);
+create table if not exists portfolio_companies (
+  id uuid primary key default gen_random_uuid(),
+  slug text not null unique, name text not null,
+  website text, careers_url text,
+  hiring_status text not null default 'not_yet_scanned' check (hiring_status in ('confirmed_open','possibly_stale','confirmed_closed','scan_failed','not_yet_scanned')),
+  open_jobs_count int not null default 0, last_checked_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create table if not exists vc_company_relationships (
+  id uuid primary key default gen_random_uuid(),
+  vc_firm_id uuid not null references vc_firms(id) on delete cascade,
+  company_id uuid not null references portfolio_companies(id) on delete cascade,
+  evidence_url text, partner_name text,
+  status text not null default 'unverified' check (status in ('verified','unverified','disputed')),
+  verified_at timestamptz, created_at timestamptz not null default now(),
+  unique (vc_firm_id, company_id),
+  check (status <> 'verified' or evidence_url is not null)
+);
+create table if not exists job_sources (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references portfolio_companies(id) on delete cascade,
+  adapter text not null, identifier text, url text not null,
+  priority int not null default 100, enabled boolean not null default true,
+  status text not null default 'never_scanned' check (status in ('never_scanned','ok','failed','needs_attention')),
+  last_attempt_at timestamptz, last_success_at timestamptz,
+  consecutive_failures int not null default 0, last_error text, last_job_count int,
+  created_at timestamptz not null default now(),
+  unique (company_id, adapter, url)
+);
+create table if not exists jobs (
+  id uuid primary key default gen_random_uuid(),
+  company_id uuid not null references portfolio_companies(id) on delete cascade,
+  source_id uuid not null references job_sources(id) on delete cascade,
+  external_id text, canonical_url text not null, fingerprint text not null,
+  title text not null, department_raw text, location_raw text,
+  workplace text not null default 'unknown',
+  posted_at timestamptz,
+  salary_min numeric, salary_max numeric, salary_currency text, salary_period text,
+  apply_url text not null check (apply_url ~* '^https?://'),
+  excerpt text, description_hash text,
+  skills text[] not null default '{}', fn text, level text,
+  status text not null default 'open' check (status in ('open','possibly_stale','closed')),
+  first_discovered_at timestamptz not null default now(), last_seen_at timestamptz not null default now(),
+  missed_scans int not null default 0, closed_at timestamptz, reopened_at timestamptz,
+  created_at timestamptz not null default now()
+);
+create unique index if not exists jobs_source_external on jobs (source_id, external_id) where external_id is not null;
+create unique index if not exists jobs_source_fingerprint on jobs (source_id, fingerprint);
+create index if not exists jobs_status_idx on jobs (status);
+create table if not exists scan_runs (
+  id uuid primary key default gen_random_uuid(),
+  status text not null, started_at timestamptz, finished_at timestamptz,
+  sources_total int, sources_ok int, sources_failed int,
+  jobs_new int, jobs_updated int, jobs_closed int, jobs_reopened int,
+  errors jsonb not null default '[]'
+);
+
+-- ===== Visitor data (private; no accounts) =====
+-- Only a hash of the browser's random token is stored, plus a de-identified skills profile. Expires automatically.
+create table if not exists cv_sessions (
+  id uuid primary key default gen_random_uuid(),
+  token_hash text not null unique,
+  profile jsonb not null check (pg_column_size(profile) < 20000),
+  created_at timestamptz not null default now(),
+  expires_at timestamptz not null
+);
+create index if not exists cv_sessions_expires on cv_sessions (expires_at);
+create table if not exists email_subscriptions (
+  id uuid primary key default gen_random_uuid(),
+  email text not null unique,
+  profile jsonb not null check (pg_column_size(profile) < 20000),
+  frequency text not null check (frequency in ('once','weekly')),
+  min_score int not null default 60,
+  confirmed_at timestamptz, last_sent_at timestamptz, last_confirm_sent_at timestamptz,
+  sent_job_ids text[] not null default '{}',
+  created_at timestamptz not null default now()
+);
+create table if not exists rate_limits (
+  key text primary key, count int not null, reset_at timestamptz not null
+);
+
+-- ===== Analytics (aggregate counters only) =====
+create table if not exists metrics_daily (
+  day date not null, name text not null, count bigint not null default 0,
+  primary key (day, name)
+);
+alter table metrics_daily enable row level security;
+revoke all on metrics_daily from anon, authenticated;
+
+-- Atomic "add 1 to each name for today" (names may repeat in the array).
+create or replace function bump_metrics(p_day date, p_names text[]) returns void
+language sql security definer set search_path = public as $$
+  insert into metrics_daily (day, name, count)
+  select p_day, n, count(*) from unnest(p_names) as n group by n
+  on conflict (day, name) do update set count = metrics_daily.count + excluded.count;
+$$;
+revoke all on function bump_metrics(date, text[]) from public, anon, authenticated;
+grant execute on function bump_metrics(date, text[]) to service_role;
+
+-- ===== Auto-discovery queue =====
+create table if not exists discovery_targets (
+  id uuid primary key default gen_random_uuid(),
+  vc_firm_id uuid not null references vc_firms(id) on delete cascade,
+  kind text not null check (kind in ('vc_site','company_site')),
+  url text not null, evidence_url text, cap int,
+  status text not null default 'pending' check (status in ('pending','working','done','no_board','failed','skipped')),
+  note text, attempts int not null default 0,
+  created_at timestamptz not null default now(), updated_at timestamptz not null default now(),
+  unique (vc_firm_id, url)
+);
+create index if not exists discovery_pending on discovery_targets (status, kind, created_at);
+
+
+-- ===== Lock everything down =====
+-- RLS on with NO policies = nobody using the public (anon / user) keys can read or write anything.
+-- Only the server, using the secret service-role key, can. Keep that key out of browsers and public repos.
+do $$ declare t text; begin
+  foreach t in array array['vc_firms','portfolio_companies','vc_company_relationships','job_sources','jobs','scan_runs','cv_sessions','email_subscriptions','rate_limits','metrics_daily','discovery_targets']
+  loop execute format('alter table %I enable row level security', t); end loop;
+end $$;
+revoke all on all tables in schema public from anon, authenticated;
+
+-- ===== Seed: VC firms (portfolios are NOT pre-filled; import verified ones from /admin) =====
+insert into vc_firms (name, firm_type) values
+('Entrée Capital','israeli'),('Aleph','israeli'),('Pitango','israeli'),('TLV Partners','israeli'),('83North','israeli'),
+('Viola Ventures','israeli'),('Vertex Ventures Israel','israeli'),('F2 Venture Capital','israeli'),('Team8','israeli'),
+('Glilot Capital Partners','israeli'),('OurCrowd','israeli'),('aMoon','israeli'),('10D','israeli'),('Magma Venture Partners','israeli'),
+('YL Ventures','israeli'),('Qumra Capital','israeli'),('Hanaco Ventures','israeli'),('Grove Ventures','israeli'),('JVP','israeli'),
+('Andreessen Horowitz','international'),('Sequoia Capital','international'),('Lightspeed Venture Partners','international'),
+('Bessemer Venture Partners','international'),('NFX','international'),('Insight Partners','international'),
+('Battery Ventures','international'),('Cyberstarts','international')
+on conflict (name) do nothing;
+
+-- VC website addresses (from memory, NOT verified: discovery reports any that fail, and you can fix them on the admin page)
+update vc_firms v set website = w.url from (values
+ ('Entrée Capital','https://entreecap.com'),('Aleph','https://aleph.vc'),('Pitango','https://www.pitango.com'),('TLV Partners','https://www.tlv.partners'),
+ ('83North','https://www.83north.com'),('Viola Ventures','https://www.viola-group.com'),('Vertex Ventures Israel','https://www.vertexventures.co.il'),
+ ('F2 Venture Capital','https://www.f2vc.com'),('Team8','https://team8.vc'),('Glilot Capital Partners','https://www.glilotcapital.com'),
+ ('OurCrowd','https://www.ourcrowd.com'),('aMoon','https://www.amoon.vc'),('10D','https://www.10d.vc'),('Magma Venture Partners','https://www.magmavc.com'),
+ ('YL Ventures','https://www.ylventures.com'),('Qumra Capital','https://www.qumracapital.com'),('Hanaco Ventures','https://www.hanaco.vc'),
+ ('Grove Ventures','https://www.grove.vc'),('JVP','https://www.jvpvc.com'),('Andreessen Horowitz','https://a16z.com'),('Sequoia Capital','https://www.sequoiacap.com'),
+ ('Lightspeed Venture Partners','https://lsvp.com'),('Bessemer Venture Partners','https://www.bvp.com'),('NFX','https://www.nfx.com'),
+ ('Insight Partners','https://www.insightpartners.com'),('Battery Ventures','https://www.battery.com'),('Cyberstarts','https://www.cyberstarts.com')
+) as w(name, url) where v.name = w.name and v.website is null;
+
+-- Tell Supabase's API to refresh its list of tables right now (avoids a short "table not found" window after creating them).
+notify pgrst, 'reload schema';
