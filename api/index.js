@@ -2136,7 +2136,7 @@ var DOCX_B64 = "UEsDBBQAAAAIADVYVF3MVIwQ4AAAAJwBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnht
 var isNet = (e) => e instanceof TypeError && /fetch failed|Failed to parse URL|Invalid URL/i.test(e.message ?? "");
 var REQUIRED_TABLES = ["vc_firms", "portfolio_companies", "job_sources", "jobs", "rate_limits", "cv_sessions", "email_subscriptions"];
 function diagnose(e) {
-  if (isNet(e)) return /parse|Invalid URL/i.test(e.message) ? { code: "bad-url", hint: "SUPABASE_URL is not a valid web address. It should look like https://YOURID.supabase.co" } : { code: "db-unreachable", hint: `Cannot reach Supabase (${e.cause?.code ?? "network error"}). Check SUPABASE_URL for a typo in the project ID` };
+  if (isNet(e)) return /parse|Invalid URL/i.test(e.message) ? { code: "bad-url", hint: "SUPABASE_URL is not a valid web address. It should look like https://https://yvjmvjsshjeerfmgjedk.supabase.co" } : { code: "db-unreachable", hint: `Cannot reach Supabase (${e.cause?.code ?? "network error"}). Check SUPABASE_URL for a typo in the project ID` };
   let status = e?.dbStatus, table = e?.table, pg = e?.pg ?? {};
   if (!status) {
     const m = /Database (?:\w+) (\S+) failed \(HTTP (\d+)\)/.exec(e?.message ?? "");
@@ -2147,7 +2147,7 @@ function diagnose(e) {
   }
   if (status) {
     if (status === 404) {
-      if (pg.html) return { code: "db-404-url", hint: "SUPABASE_URL answered with a web page, not the Supabase data API. Use https://YOURID.supabase.co (not the dashboard address) and redeploy" };
+      if (pg.html) return { code: "db-404-url", hint: "SUPABASE_URL answered with a web page, not the Supabase data API. Use https://https://yvjmvjsshjeerfmgjedk.supabase.co (not the dashboard address) and redeploy" };
       if (pg.code === "PGRST205") return { code: "db-404-table", hint: `The table "${/table '(?:public\.)?([\w]+)'/.exec(pg.message ?? "")?.[1] ?? table}" does not exist in the Supabase project that SUPABASE_URL points to. Run supabase-setup.sql in the SQL Editor of that same project` };
       if (pg.code === "PGRST202") return { code: "db-404-function", hint: "A database function is missing. Run supabase-setup.sql (or analytics.sql) in the SQL Editor of the project that SUPABASE_URL points to" };
       return { code: "db-404", hint: `Supabase answered 404 for "${table}". Check SUPABASE_URL, and run supabase-setup.sql in that same project` };
