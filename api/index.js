@@ -453,13 +453,37 @@ var pickRow = (job) => {
   for (const c of JOB_COLS) r[c] = TS.includes(c) ? iso(job[c]) : job[c] ?? null;
   return r;
 };
+var stripQuotes = (v) => String(v ?? "").trim().replace(/^["'`]+|["'`]+$/g, "").trim();
+function normalizeSupabaseUrl(raw) {
+  let u = stripQuotes(raw);
+  if (!u) return "";
+  if (!/^https?:\/\//i.test(u)) u = "https://" + u;
+  return u.replace(/\/+$/, "").replace(/\/rest\/v1$/i, "").replace(/\/+$/, "");
+}
 function createDb({ url = process.env.SUPABASE_URL, key = process.env.SUPABASE_SERVICE_ROLE_KEY, fetchImpl = fetch } = {}) {
+  url = normalizeSupabaseUrl(url);
+  key = stripQuotes(key);
   if (!url || !key) throw new Error("Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY");
   const base = url.replace(/\/$/, "") + "/rest/v1";
   const headers = { apikey: key, ...key.startsWith("sb_") ? {} : { authorization: `Bearer ${key}` }, "content-type": "application/json" };
   async function rest(path, { method = "GET", body, prefer = "return=representation" } = {}) {
     const r = await fetchImpl(`${base}/${path}`, { method, headers: { ...headers, prefer }, body: body === void 0 ? void 0 : JSON.stringify(body) });
-    if (!r.ok) throw new Error(`Database ${method} ${path.split("?")[0]} failed (HTTP ${r.status})`);
+    if (!r.ok) {
+      const table = path.split("?")[0];
+      const err = new Error(`Database ${method} ${table} failed (HTTP ${r.status})`);
+      let pg = null;
+      try {
+        const text = (await r.text()).slice(0, 2e3);
+        if (/^\s*</.test(text)) pg = { html: true };
+        else {
+          const j = JSON.parse(text);
+          pg = { code: typeof j.code === "string" ? j.code.slice(0, 20) : null, message: /^PGRST20[25]$/.test(j.code ?? "") ? String(j.message ?? "").slice(0, 160) : null };
+        }
+      } catch {
+      }
+      Object.assign(err, { dbStatus: r.status, table, pg });
+      throw err;
+    }
     const t = await r.text();
     return t ? JSON.parse(t) : null;
   }
@@ -1857,11 +1881,11 @@ async function analytics(db, days) {
 // src/ui.mjs
 var CSS = `:root{--bg:#F6F1E7;--card:#FBF8F2;--line:#E3DCCD;--ink:#1B2438;--muted:#6B7488;--nav:#0B1426;--brass:#B08D57;--brass-l:#D4B483;--good:#3E8E6A;--amber:#C98A2B;--bad:#B5483F;color-scheme:light;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 @media (prefers-color-scheme:dark){:root{--bg:#0B1426;--card:#101C33;--line:#2B4066;--ink:#EDE8DC;--muted:#8A96AB;--nav:#070E1C;--brass:#D4B483;color-scheme:dark}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,sans-serif}
 header{background:var(--nav);color:#F6F1E7;padding:14px 16px;border-bottom:3px solid var(--brass)}h1{font:600 20px/1.2 Georgia,"Source Serif 4",serif;margin:0}header small{color:var(--brass-l)}
 main{max-width:860px;margin:0 auto;padding:14px 14px 60px}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;margin-bottom:12px}
 h2{font-size:17px;margin:0 0 6px}.hint{color:var(--muted);font-size:13px}label{display:block;font-weight:600;margin:10px 0 4px;font-size:14px}
-input,select,textarea{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}textarea{min-height:120px}input[type=checkbox],input[type=radio]{width:auto}
+input,select,textarea{width:100%;padding:10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;font-size:16px}textarea{min-height:120px}input[type=checkbox],input[type=radio]{width:auto}
 button,.btn{background:var(--brass);color:#0B1426;border:1px solid var(--brass);border-radius:8px;padding:9px 16px;font:600 15px inherit;cursor:pointer;text-decoration:none;display:inline-block}button.sec{background:transparent;color:var(--ink);border-color:var(--line)}button.link{background:none;border:none;color:var(--muted);text-decoration:underline;padding:6px 0;font-weight:400}button:disabled{opacity:.5}
 .drop{display:block;border:2px dashed var(--brass);border-radius:10px;padding:22px;text-align:center;cursor:pointer;font-weight:600}.drop.over{background:var(--line)}
 .msg{margin-top:8px;font-size:14px}.err{color:var(--bad)}.ok{color:var(--good)}
@@ -1874,6 +1898,7 @@ details{margin-top:6px;font-size:13px}summary{cursor:pointer;color:var(--muted)}
 .apply{margin-top:8px;font-size:13px;padding:6px 12px}.priv{margin-top:10px;padding:8px 10px;border-left:3px solid var(--brass);background:var(--bg)}`;
 var shell = (title, body, script) => `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><meta name="referrer" content="no-referrer"><title>${title}</title><style>${CSS}</style></head><body>${body}<script>${script}</script></body></html>`;
 var COMMON = `var $=function(i){return document.getElementById(i)};
+function clear(n){while(n.firstChild)n.removeChild(n.firstChild)}
 function el(t,c,x){var e=document.createElement(t);if(c)e.className=c;if(x!=null)e.textContent=x;return e}
 async function api(p,o){o=o||{};var h={'x-requested-with':'cvmatch'};if(o.type)h['content-type']=o.type;
  var r=await fetch(p,{method:o.method||'GET',credentials:'same-origin',headers:h,body:o.body});var j={};try{j=await r.json()}catch(e){}return {ok:r.ok,status:r.status,data:j}}`;
@@ -1911,17 +1936,19 @@ function renderApp({ contactEnabled = false } = {}) {
 <div class="card"><h2>Your data</h2><p class="hint">Delete your skills summary from our servers right now.</p><button class="sec" id="del" type="button">Delete my data</button></div>
 </section>${contactEnabled ? '<p class="hint" style="text-align:center;margin-top:18px"><a href="/contact" style="color:inherit">Contact us</a></p>' : ""}</main>`, COMMON + `
 var P=null,ME=null,timer=null;
+var HTTP_HINT={413:' The server refused a file this large. Try a smaller PDF or paste the text.',408:' It took too long. Try again or paste the text.',504:' It took too long. Try again or paste the text.',401:' Access was blocked. If this is your site, check Vercel Deployment Protection.',403:' Access was blocked. If this is your site, check Vercel Deployment Protection.',404:' The upload service was not found (a deployment problem).',429:' Too many tries. Please wait a while.'};
+function failText(r,fallback){var d=r.data||{};if(d.error)return d.error+(d.code?' (code: '+d.code+')':'');return fallback+' (HTTP '+r.status+').'+(HTTP_HINT[r.status]||' Please try again.')}
 function setMsg(id,t,cls){var m=$(id);m.className='msg'+(cls?' '+cls:'');m.textContent=t||''}
 async function upload(body,type,name){setMsg('upmsg','Reading your CV...');$('drop').style.opacity=.6;
  var r=await api('/api/cv',{method:'POST',body:body,type:type});$('drop').style.opacity=1;
- if(!r.ok){setMsg('upmsg',(r.data.error||'Upload failed')+(r.data.code?' (code: '+r.data.code+')':''),'err');return}
+ if(!r.ok){setMsg('upmsg',failText(r,'Upload failed'),'err');return}
  setMsg('upmsg','Done. Found '+r.data.profile.skills.length+' skills.','ok');P=r.data.profile;show()}
 $('file').onchange=function(){var f=this.files[0];if(!f)return;if(f.size>4*1024*1024){setMsg('upmsg','That file is over 4 MB. Try a smaller PDF or paste the text.','err');return}upload(f,'application/octet-stream');this.value=''};
 ['dragover','dragenter'].forEach(function(e){$('drop').addEventListener(e,function(ev){ev.preventDefault();$('drop').classList.add('over')})});
 ['dragleave','drop'].forEach(function(e){$('drop').addEventListener(e,function(ev){ev.preventDefault();$('drop').classList.remove('over');if(e==='drop'&&ev.dataTransfer.files[0]){var f=ev.dataTransfer.files[0];if(f.size>4*1024*1024){setMsg('upmsg','That file is over 4 MB.','err');return}upload(f,'application/octet-stream')}})});
 $('pastebtn').onclick=function(){$('pastebox').hidden=!$('pastebox').hidden};
 $('usepaste').onclick=function(){var t=$('paste').value;if(t.trim().length<80){setMsg('upmsg','Paste a little more of your CV.','err');return}upload(t,'text/plain')};
-function chips(box,items,onrm,cls){box.replaceChildren();items.forEach(function(s,i){var c=el('span','chip'+(cls?' '+cls:''),s);if(onrm){var b=el('button',null,'\\u00d7');b.type='button';b.setAttribute('aria-label','Remove '+s);b.onclick=function(){onrm(i)};c.append(b)}box.append(c)})}
+function chips(box,items,onrm,cls){clear(box);items.forEach(function(s,i){var c=el('span','chip'+(cls?' '+cls:''),s);if(onrm){var b=el('button',null,'\\u00d7');b.type='button';b.setAttribute('aria-label','Remove '+s);b.onclick=function(){onrm(i)};c.append(b)}box.append(c)})}
 function show(){$('after').hidden=false;
  chips($('skills'),P.skills,function(i){P.skills.splice(i,1);show()});
  chips($('fns'),P.functions,function(i){P.functions.splice(i,1);show()});
@@ -1941,8 +1968,9 @@ var LAB={strong:'Strong',good:'Good',stretch:'Stretch',weak:'Weak'};
 async function loadMatches(){var qs='min='+$('min').value+'&q='+encodeURIComponent($('q').value)+'&vc='+encodeURIComponent($('vc').value)+'&company='+encodeURIComponent($('co').value)+'&workplace='+$('wp').value+($('new').checked?'&new=7':'');
  var r=await api('/api/matches?'+qs);
  if(r.status===401){$('after').hidden=true;setMsg('upmsg','Your session expired. Please upload your CV again.','err');return}
- var d=r.data;fillSel('vc',d.facets.vcs,'All VC firms');fillSel('co',d.facets.companies,'All companies');$('bands').replaceChildren();['strong','good','stretch','weak'].forEach(function(b){var s=el('span',b,d.bands[b]+' '+LAB[b].toLowerCase());$('bands').append(s)});
- var L=$('list');L.replaceChildren();
+ if(!r.ok||!r.data||!r.data.facets){var L0=$('list');clear(L0);L0.append(el('p','msg err',failText(r,'Could not load your matches')));return}
+ var d=r.data;fillSel('vc',d.facets.vcs,'All VC firms');fillSel('co',d.facets.companies,'All companies');clear($('bands'));['strong','good','stretch','weak'].forEach(function(b){var s=el('span',b,d.bands[b]+' '+LAB[b].toLowerCase());$('bands').append(s)});
+ var L=$('list');clear(L);
  if(!d.total){L.append(el('p','hint','No jobs are listed yet. Check back soon.'));return}
  if(!d.jobs.length)L.append(el('p','hint','No roles match these filters.'));
  d.jobs.forEach(function(j){var c=el('div','job');var top=el('div','top');var l=el('div');l.append(el('h3',null,j.title));
@@ -1954,10 +1982,10 @@ async function loadMatches(){var qs='min='+$('min').value+'&q='+encodeURICompone
   if(j.excerpt)c.append(el('p','meta',j.excerpt));
   if(j.apply_url){var a=el('a','btn apply','View and apply');a.href='/go?j='+encodeURIComponent(j.id);a.target='_blank';a.rel='noopener noreferrer';c.append(a)}
   L.append(c)})}
-function fillSel(id,items,all){var s=$(id),cur=s.value;s.replaceChildren();var o=el('option',null,all);o.value='';s.append(o);items.forEach(function(i){var x=el('option',null,i.name+' ('+i.n+')');x.value=i.name;s.append(x)});s.value=cur}
+function fillSel(id,items,all){var s=$(id),cur=s.value;clear(s);var o=el('option',null,all);o.value='';s.append(o);items.forEach(function(i){var x=el('option',null,i.name+' ('+i.n+')');x.value=i.name;s.append(x)});s.value=cur}
 async function loadGaps(){var r=await api('/api/gaps');if(!r.ok){$('gaps').hidden=true;return}var d=r.data;$('gaps').hidden=false;
  $('gapnote').textContent=d.based_on?('Based on the '+d.based_on+' roles you fit best.'):'Not enough close-fit roles yet to compare.';
- var L=$('gaplist');L.replaceChildren();if(!d.gaps.length&&d.based_on)L.append(el('p','hint','No clear gaps: the close-fit roles mostly ask for skills you already show.'));
+ var L=$('gaplist');clear(L);if(!d.gaps.length&&d.based_on)L.append(el('p','hint','No clear gaps: the close-fit roles mostly ask for skills you already show.'));
  d.gaps.forEach(function(g){var w=el('div','why');var l=el('span',null,g.skill);var ex=g.examples.map(function(e){return e.title+' at '+e.company}).join('; ');w.append(l,el('span',null,g.count+' of '+d.based_on));L.append(w);L.append(el('div','meta','e.g. '+ex))});
  chips($('strong'),d.strengths.map(function(x){return x.skill+' ('+x.count+')'}),null,'m')}
 ['vc','co','wp','new'].forEach(function(i){$(i).onchange=loadMatches});
@@ -2005,11 +2033,11 @@ function renderAdmin() {
 async function call(p,m,b){var r=await fetch(p,{method:m,headers:{'authorization':'Bearer '+$('tk').value,'content-type':'application/json'},body:b});var t=await r.text();$('out').textContent=r.status+' '+t}
 
 async function adm(p,b){var r=await fetch(p,{method:b===undefined?'GET':'POST',headers:{'authorization':'Bearer '+$('tk').value,'content-type':'application/json'},body:b===undefined?undefined:JSON.stringify(b)});var d={};try{d=await r.json()}catch(e){}return {ok:r.ok,status:r.status,data:d}}
-$('tk').onchange=async function(){loadVcTable();var r=await adm('/api/admin/status');if(!r.ok)return;var v=$('vc');v.replaceChildren();var o=el('option',null,'(no VC link)');o.value='';v.append(o);(r.data.vcs||[]).forEach(function(n){var x=el('option',null,n);x.value=n;v.append(x)})};
+$('tk').onchange=async function(){loadVcTable();var r=await adm('/api/admin/status');if(!r.ok)return;var v=$('vc');clear(v);var o=el('option',null,'(no VC link)');o.value='';v.append(o);(r.data.vcs||[]).forEach(function(n){var x=el('option',null,n);x.value=n;v.append(x)})};
 
 var STOP=false;
 function dmsg(t,cls){var m=$('discmsg');m.className='msg'+(cls?' '+cls:'');m.textContent=t}
-async function loadVcTable(){var r=await adm('/api/admin/discover/status');if(!r.ok)return;var T=$('vctable');T.replaceChildren();
+async function loadVcTable(){var r=await adm('/api/admin/discover/status');if(!r.ok)return;var T=$('vctable');clear(T);
  var sc=$('scope');while(sc.options.length>2)sc.remove(2);r.data.vcs.forEach(function(v){var o=el('option',null,'Only '+v.vc);o.value=v.vc;sc.append(o)});
  var tb=table(['VC','Website','Sites found','With job board','No board','Unverified links',''],r.data.vcs.map(function(v){return [v.vc,'',v.sites_found,v.sites_done,v.sites_no_board,v.links_unverified,'']}));
  r.data.vcs.forEach(function(v,i){var row=tb.rows[i+1];var inp=document.createElement('input');inp.value=v.website||'';inp.placeholder='https://...';inp.style.minWidth='160px';var sv=el('button','sec','Save');sv.type='button';sv.onclick=async function(){var a=await adm('/api/admin/vc-website',{vc:v.vc,website:inp.value});sv.textContent=a.ok?'Saved':'Error'};row.cells[1].append(inp,sv);
@@ -2017,7 +2045,7 @@ async function loadVcTable(){var r=await adm('/api/admin/discover/status');if(!r
  T.append(tb)}
 function logLine(l){var d=el('div',null,'['+l.status+'] '+l.vc+': '+l.note);$('disclog').prepend(d);while($('disclog').children.length>40)$('disclog').lastChild.remove()}
 $('stopdisc').onclick=function(){STOP=true;dmsg('Stopping after the current step...')};
-$('disc').onclick=async function(){STOP=false;$('disclog').replaceChildren();this.disabled=true;dmsg('Queuing VCs...');
+$('disc').onclick=async function(){STOP=false;clear($('disclog'));this.disabled=true;dmsg('Queuing VCs...');
  var sv=$('scope').value;var st=await adm('/api/admin/discover/start',{scope:(sv==='israeli'||sv==='all')?sv:[sv],max_per_vc:Number($('cap').value)});
  if(!st.ok){dmsg(st.data.error||'Could not start ('+st.status+')','err');this.disabled=false;return}
  if(st.data.skipped.length)logLine({status:'skipped',vc:'No website set',note:st.data.skipped.map(function(x){return x.vc}).join(', ')});
@@ -2028,7 +2056,7 @@ $('disc').onclick=async function(){STOP=false;$('disclog').replaceChildren();thi
 function addMsg(t,cls){var m=$('addres');m.className='msg'+(cls?' '+cls:'');m.textContent=t}
 function summary(d){return d.submitted+' submitted: '+d.companies_created+' new companies, '+d.companies_existing+' already there, '+d.links_created+' VC links added'+(d.errors&&d.errors.length?'. Problems: '+d.errors.join('; '):'.')}
 $('addlines').onclick=async function(){addMsg('Adding...');var r=await adm('/api/admin/quick-add',{vc:$('vc').value,evidence_url:$('ev').value,lines:$('lines').value});addMsg(r.ok?summary(r.data):(r.data.error||'Failed ('+r.status+')'),r.ok?'ok':'err')};
-$('find').onclick=async function(){var F=$('found');F.replaceChildren();F.append(el('p','hint','Reading the page...'));var r=await adm('/api/admin/harvest',{url:$('pg').value});F.replaceChildren();
+$('find').onclick=async function(){var F=$('found');clear(F);F.append(el('p','hint','Reading the page...'));var r=await adm('/api/admin/harvest',{url:$('pg').value});clear(F);
  if(!r.ok){F.append(el('p','msg err',r.data.error||'Failed ('+r.status+')'));return}
  var d=r.data;if(d.note)F.append(el('p','msg err',d.note));
  if(d.unsupported.length)F.append(el('p','hint','Found but not supported yet: '+d.unsupported.map(function(u){return u.adapter+':'+u.identifier}).join(', ')));
@@ -2038,12 +2066,12 @@ $('find').onclick=async function(){var F=$('found');F.replaceChildren();F.append
  var btn=el('button',null,'Add selected');btn.type='button';btn.onclick=async function(){var sel=rows.filter(function(x){return x.c.checked}).map(function(x){return {name:x.n.value,adapter:x.b.adapter,identifier:x.b.identifier}});addMsg('Adding...');var a=await adm('/api/admin/quick-add',{vc:$('vc').value,evidence_url:$('ev').value,boards:sel});addMsg(a.ok?summary(a.data):(a.data.error||'Failed'),a.ok?'ok':'err')};F.append(el('p'));F.lastChild.append(btn)};
 $('imp').onclick=function(){var v;try{v=JSON.parse($('items').value)}catch(e){$('out').textContent='That is not valid JSON';return}call('/api/admin/import','POST',JSON.stringify({items:v}))};
 $('scan').onclick=function(){call('/api/admin/scan','POST','{}')};
-$('selft').onclick=async function(){$('report').replaceChildren();$('out').textContent='Running...';var r=await fetch('/api/admin/selftest',{headers:{'authorization':'Bearer '+$('tk').value}});if(!r.ok){$('out').textContent=r.status+' '+(await r.text());return}var d=await r.json();$('out').textContent='';
+$('selft').onclick=async function(){clear($('report'));$('out').textContent='Running...';var r=await fetch('/api/admin/selftest',{headers:{'authorization':'Bearer '+$('tk').value}});if(!r.ok){$('out').textContent=r.status+' '+(await r.text());return}var d=await r.json();$('out').textContent='';
  section(d.ok?'Self-test: all good':'Self-test: something needs fixing',table(['Check','Result','Details'],d.steps.map(function(x){return [x.name,x.ok?'OK':'PROBLEM',x.note]})),d.ok?'Uploads, the database and both file readers work.':'Fix the first PROBLEM row, then run it again.')};$('stat').onclick=function(){call('/api/admin/status','GET')};
 function table(h,rows){var t=el('table');t.style.cssText='width:100%;border-collapse:collapse;font-size:13px';var tr=el('tr');h.forEach(function(x){var c=el('th',null,x);c.style.cssText='text-align:left;border-bottom:1px solid var(--line);padding:4px';tr.append(c)});t.append(tr);
  rows.forEach(function(r){var q=el('tr');r.forEach(function(x){var c=el('td',null,x==null?'-':String(x));c.style.cssText='padding:4px;border-bottom:1px solid var(--line)';q.append(c)});t.append(q)});return t}
 function section(title,node,note){var c=el('div','card');c.append(el('h2',null,title));if(note)c.append(el('p','hint',note));c.append(node);$('report').append(c)}
-$('ana').onclick=async function(){$('report').replaceChildren();var r=await fetch('/api/admin/analytics?days=30',{headers:{'authorization':'Bearer '+$('tk').value}});if(!r.ok){$('out').textContent=r.status+' '+(await r.text());return}$('out').textContent='';var d=await r.json(),c=d.coverage.summary,u=d.usage;
+$('ana').onclick=async function(){clear($('report'));var r=await fetch('/api/admin/analytics?days=30',{headers:{'authorization':'Bearer '+$('tk').value}});if(!r.ok){$('out').textContent=r.status+' '+(await r.text());return}$('out').textContent='';var d=await r.json(),c=d.coverage.summary,u=d.usage;
  section('Where the jobs come from',table(['VC firm','Type','Companies','Verified links','Unverified links','Open jobs','Scan problems','Not scanned'],d.coverage.by_vc.map(function(x){return [x.vc,x.type,x.companies,x.verified_links,x.unverified_links,x.open_jobs,x.scan_problems,x.not_scanned]})),
   'Collecting from '+c.companies+' companies across '+c.vc_firms_with_companies+' of '+c.vc_firms_total+' VC firms; '+c.open_jobs+' open jobs at '+c.companies_with_open_jobs+' companies. '+c.companies_without_vc_link+' companies have no VC link. Jobs at a company backed by several firms count under each.');
  var f=u.funnel;section('Usage, last '+u.days+' days',table(['Metric','Total'],Object.entries(u.totals)),'Visit to upload: '+(f.visit_to_upload_pct==null?'-':f.visit_to_upload_pct+'%')+' | Upload to email request: '+(f.upload_to_email_request_pct==null?'-':f.upload_to_email_request_pct+'%')+' | Email confirmed: '+(f.email_confirm_pct==null?'-':f.email_confirm_pct+'%')+' | Apply clicks per matches view: '+(f.clicks_per_matches_view==null?'-':f.clicks_per_matches_view));
@@ -2105,17 +2133,43 @@ var PDF_B64 = "JVBERi0xLjMKJZOMi54gUmVwb3J0TGFiIEdlbmVyYXRlZCBQREYgZG9jdW1lbnQgK
 var DOCX_B64 = "UEsDBBQAAAAIADVYVF3MVIwQ4AAAAJwBAAATAAAAW0NvbnRlbnRfVHlwZXNdLnhtbH2Qy07DMBBFf8XyFsUTukAIJekCyhJYlA+w7Eli4Zc8bil/z6QtXaDC0r6PM7rd+hC82GMhl2Ivb1UrBUaTrItTL9+3z829XA/d9isjCbZG6uVca34AIDNj0KRSxsjKmErQlZ9lgqzNh54QVm17BybFirE2demQQ/eEo975KjYH/j5hC3qS4vFkXFi91Dl7Z3RlHfbR/qI0Z4Li5NFDs8t0wwYJVwmL8jfgnHvlHYqzKN50qS86sAs+U7Fgk9kFTqr/a67cmcbRGbzkl7ZckkEiHjh4dVGCdvHnfjjOPXwDUEsDBBQAAAAIADVYVF02V97cogAAABgBAAALAAAAX3JlbHMvLnJlbHONzzsOwjAMBuCrRN6pCwNCqGkXhNQVlQNEiZtGNA8l4XV7MjBQxMBo+/dnuekedmY3isl4x2Fd1cDISa+M0xzOw3G1g65tTjSLXBJpMiGxsuIShynnsEdMciIrUuUDuTIZfbQilzJqDEJehCbc1PUW46cBS5P1ikPs1RrY8Az0j+3H0Ug6eHm15PKPE1+JIouoKXO4+6hQvdtVYQHbBhcvti9QSwMEFAAAAAgANVhUXUc6rVjwAAAAfAEAABEAAAB3b3JkL2RvY3VtZW50LnhtbG1QsU7FMAz8FSs7TWFAqGrfG5CYWNAD9pD4tVETJ7LzKPw9SSVggOWcOJc7n8fjRwzwjiw+0aSuu14Bkk3O0zypl+eHqzt1PIzb4JK9RKQClU8ybJNaSsmD1mIXjEa6lJHq2zlxNKVeedZbYpc5WRSpcjHom76/1dF4Uk3yLbnPVnMDblAOJwxnKCgF7l8HECSfGDLyLksWIRpesVS5eiIzI8PmywKnp0cw5CAb7yCi8wZk9SFIN+qm25B3zH8tbdp/spnZ5AUkQVkQfhIzmppR9mb05OMlQkCaq20da29XiqujVJpd/3PU32n17yYPX1BLAQIUAxQAAAAIADVYVF3MVIwQ4AAAAJwBAAATAAAAAAAAAAAAAACAAQAAAABbQ29udGVudF9UeXBlc10ueG1sUEsBAhQDFAAAAAgANVhUXTZX3tyiAAAAGAEAAAsAAAAAAAAAAAAAAIABEQEAAF9yZWxzLy5yZWxzUEsBAhQDFAAAAAgANVhUXUc6rVjwAAAAfAEAABEAAAAAAAAAAAAAAIAB3AEAAHdvcmQvZG9jdW1lbnQueG1sUEsFBgAAAAADAAMAuQAAAPsCAAAAAA==";
 
 // src/selftest.mjs
-function explain(e) {
-  const m = /HTTP (\d+)/.exec(e?.message ?? "");
-  if (m) return m[1] === "401" || m[1] === "403" ? `Supabase rejected the key (HTTP ${m[1]}). Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel` : m[1] === "404" ? "table or function not found (HTTP 404). Run supabase-setup.sql in the Supabase SQL Editor" : `database error (HTTP ${m[1]})`;
-  return `${e?.name ?? "Error"}: ${String(e?.message ?? e).slice(0, 160)}`;
+var isNet = (e) => e instanceof TypeError && /fetch failed|Failed to parse URL|Invalid URL/i.test(e.message ?? "");
+var REQUIRED_TABLES = ["vc_firms", "portfolio_companies", "job_sources", "jobs", "rate_limits", "cv_sessions", "email_subscriptions"];
+function diagnose(e) {
+  if (isNet(e)) return /parse|Invalid URL/i.test(e.message) ? { code: "bad-url", hint: "SUPABASE_URL is not a valid web address. It should look like https://YOURID.supabase.co" } : { code: "db-unreachable", hint: `Cannot reach Supabase (${e.cause?.code ?? "network error"}). Check SUPABASE_URL for a typo in the project ID` };
+  let status = e?.dbStatus, table = e?.table, pg = e?.pg ?? {};
+  if (!status) {
+    const m = /Database (?:\w+) (\S+) failed \(HTTP (\d+)\)/.exec(e?.message ?? "");
+    if (m) {
+      table = m[1];
+      status = Number(m[2]);
+    }
+  }
+  if (status) {
+    if (status === 404) {
+      if (pg.html) return { code: "db-404-url", hint: "SUPABASE_URL answered with a web page, not the Supabase data API. Use https://YOURID.supabase.co (not the dashboard address) and redeploy" };
+      if (pg.code === "PGRST205") return { code: "db-404-table", hint: `The table "${/table '(?:public\.)?([\w]+)'/.exec(pg.message ?? "")?.[1] ?? table}" does not exist in the Supabase project that SUPABASE_URL points to. Run supabase-setup.sql in the SQL Editor of that same project` };
+      if (pg.code === "PGRST202") return { code: "db-404-function", hint: "A database function is missing. Run supabase-setup.sql (or analytics.sql) in the SQL Editor of the project that SUPABASE_URL points to" };
+      return { code: "db-404", hint: `Supabase answered 404 for "${table}". Check SUPABASE_URL, and run supabase-setup.sql in that same project` };
+    }
+    if (status === 401 || status === 403) return { code: `db-${status}`, hint: `Supabase rejected the key (HTTP ${status}). Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in Vercel` };
+    return { code: `db-${status}`, hint: `database error (HTTP ${status})` };
+  }
+  if (e?.code === "ERR_MODULE_NOT_FOUND" || /Cannot find (package|module)/i.test(e?.message ?? "")) return { code: "missing-dependency", hint: 'A required package (unpdf or mammoth) is not installed. Check that package.json in GitHub lists both under "dependencies", then redeploy' };
+  if (/SUPABASE_URL|SERVICE_ROLE/.test(e?.message ?? "")) return { code: "missing-setting", hint: "SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is not set in Vercel" };
+  return { code: "internal", hint: `${e?.name ?? "Error"}: ${String(e?.message ?? e).slice(0, 160)}` };
 }
-function codeOf(e) {
-  const m = /Database .* failed \(HTTP (\d+)\)/.exec(e?.message ?? "");
-  if (m) return `db-${m[1]}`;
-  if (e?.code === "ERR_MODULE_NOT_FOUND" || /Cannot find (package|module)/i.test(e?.message ?? "")) return "missing-dependency";
-  if (/SUPABASE_URL|SERVICE_ROLE/.test(e?.message ?? "")) return "missing-setting";
-  return "internal";
+var explain = (e) => diagnose(e).hint;
+async function checkTables(db) {
+  const missing = [], other = [];
+  for (const t of REQUIRED_TABLES) {
+    try {
+      await db.rest(`${t}?select=*&limit=1`);
+    } catch (e) {
+      (e?.dbStatus === 404 && e?.pg?.code === "PGRST205" ? missing : other).push({ table: t, e });
+    }
+  }
+  return { missing: missing.map((m) => m.table), problem: other[0] ? diagnose(other[0].e) : null };
 }
 async function selfTest(db, env = process.env) {
   const steps = [];
@@ -2123,9 +2177,15 @@ async function selfTest(db, env = process.env) {
     try {
       steps.push({ name, ok: true, note: await fn() ?? "" });
     } catch (e) {
-      steps.push({ name, ok: false, note: explain(e) });
+      steps.push({ name, ok: false, note: e?.hintOverride ?? explain(e) });
     }
   };
+  await add("Required tables exist", async () => {
+    const c = await checkTables(db);
+    if (c.missing.length) throw Object.assign(new Error("x"), { hintOverride: `Missing tables: ${c.missing.join(", ")}. Run supabase-setup.sql in the SQL Editor of the Supabase project that SUPABASE_URL points to (then wait a minute and retry)` });
+    if (c.problem) throw Object.assign(new Error("x"), { hintOverride: c.problem.hint });
+    return `all ${REQUIRED_TABLES.length} found`;
+  });
   await add("Database read (VC list)", async () => {
     const r = await db.rest("vc_firms?select=id&limit=100");
     if (!r.length) throw new Error("The VC list is empty. Run supabase-setup.sql in the Supabase SQL Editor");
@@ -2188,9 +2248,9 @@ function makeHandlers(deps = {}) {
   };
   const fail = (res, e) => {
     if (e instanceof CvError || e instanceof HarvestError || e?.status) return send(res, e.status ?? 400, { error: e.message });
-    const code = codeOf(e);
-    console.error("cvmatch error", code, e?.name ?? "", /^Database /.test(e?.message ?? "") ? e.message : "");
-    return send(res, 500, { error: "Something went wrong. Please try again.", code });
+    const d = diagnose(e);
+    console.error(JSON.stringify({ evt: "api_error", code: d.code, status: e?.dbStatus ?? null, table: e?.table ?? null, pg: e?.pg ? { code: e.pg.code ?? null, message: e.pg.message ?? null, html: !!e.pg.html } : null, name: e?.name ?? null }));
+    return send(res, 500, { error: "Something went wrong. Please try again.", code: d.code });
   };
   const adminOk = async (req, res, d) => {
     const t = process.env.ADMIN_TOKEN;
@@ -2198,17 +2258,15 @@ function makeHandlers(deps = {}) {
       send(res, 503, { error: "Set ADMIN_TOKEN (20+ characters)" });
       return false;
     }
-    const rl = await rateLimit(d, `admin:${sha256(clientIp(req))}`, 30, 600);
-    if (!rl.ok) {
-      send(res, 429, { error: "Too many attempts" });
-      return false;
-    }
     const h = req.headers.authorization ?? "";
-    if (!h.startsWith("Bearer ") || !sameSecret(h.slice(7), t)) {
-      send(res, 401, { error: "Unauthorized" });
-      return false;
+    if (h.startsWith("Bearer ") && sameSecret(h.slice(7), t)) return true;
+    let limited = false;
+    try {
+      limited = !(await rateLimit(d, `admin-fail:${sha256(clientIp(req))}`, 20, 600)).ok;
+    } catch {
     }
-    return true;
+    send(res, limited ? 429 : 401, { error: limited ? "Too many attempts" : "Unauthorized" });
+    return false;
   };
   const cronOk = (req, res) => {
     const s = process.env.CRON_SECRET;
@@ -2277,11 +2335,16 @@ function makeHandlers(deps = {}) {
       const settings = { SUPABASE_URL: ok(e.SUPABASE_URL), SUPABASE_SERVICE_ROLE_KEY: ok(e.SUPABASE_SERVICE_ROLE_KEY), ADMIN_TOKEN: ok(e.ADMIN_TOKEN, 20), CRON_SECRET: ok(e.CRON_SECRET, 16), SITE_URL: ok(e.SITE_URL), SCAN_CONTACT: ok(e.SCAN_CONTACT), "TOKEN_SECRET (needed for email)": ok(e.TOKEN_SECRET, 32), "CONTACT_FORM_URL (optional)": contactUrl() ? "set" : "not set" };
       let database;
       try {
-        const rows = await db().rest("vc_firms?select=id&limit=100");
-        database = rows.length ? `OK: connected, ${rows.length} VC firms found` : "PROBLEM: connected, but the VC list is empty. Run supabase-setup.sql in the Supabase SQL Editor";
+        const d = db();
+        const c = await checkTables(d);
+        if (c.missing.length) database = `PROBLEM: these tables are missing in the Supabase project behind SUPABASE_URL: ${c.missing.join(", ")}. Run supabase-setup.sql in the SQL Editor of that same project`;
+        else if (c.problem) database = "PROBLEM: " + c.problem.hint;
+        else {
+          const rows = await d.rest("vc_firms?select=id&limit=100");
+          database = rows.length ? `OK: connected, all tables found, ${rows.length} VC firms` : "PROBLEM: connected, but the VC list is empty. Run supabase-setup.sql in the Supabase SQL Editor";
+        }
       } catch (err) {
-        const code = /HTTP (\d+)/.exec(err.message)?.[1];
-        database = "PROBLEM: " + (code === "401" || code === "403" ? "Supabase rejected the key (HTTP " + code + "). Check SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY" : code === "404" ? "tables not found (HTTP 404). Run supabase-setup.sql in the Supabase SQL Editor" : err.message);
+        database = "PROBLEM: " + diagnose(err).hint;
       }
       send(res, 200, { settings, database, email: emailEnabled() ? "on" : "off (optional)" });
     },
